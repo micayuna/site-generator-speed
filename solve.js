@@ -438,31 +438,31 @@ function parsePath(str) {
 
 // Op kinds: 0 text, 1 output ({{ }} escaped, {{{ }}} raw), 2 for,
 // 3 if, 4 include, 5 endfor, 6 endif, 7 else.
-function parseTag(content) {
+function parseTag(content, raw) {
   if (content === 'endfor') return { t: 5 };
   if (content === 'endif') return { t: 6 };
   if (content === 'else') return { t: 7 };
   let m = /^for\s+([A-Za-z_][A-Za-z0-9_]*)\s+in\s+(.+)$/.exec(content);
   if (m) {
     const path = parsePath(m[2]);
-    if (!path) return { error: 'a path is not one' };
+    if (!path) return { error: '"' + m[2] + '" is not a path' };
     return { t: 2, v: m[1], path };
   }
   m = /^if\s+not\s+(.+)$/.exec(content);
   if (m) {
     const path = parsePath(m[1]);
-    if (!path) return { error: 'a path is not one' };
+    if (!path) return { error: '"' + m[1] + '" is not a path' };
     return { t: 3, path, neg: true };
   }
   m = /^if\s+(.+)$/.exec(content);
   if (m) {
     const path = parsePath(m[1]);
-    if (!path) return { error: 'a path is not one' };
+    if (!path) return { error: '"' + m[1] + '" is not a path' };
     return { t: 3, path, neg: false };
   }
   m = /^include\s+"([^"]*)"$/.exec(content);
   if (m) return { t: 4, name: m[1] };
-  return { error: 'a tag is none of the above' };
+  return { error: raw + ' is not a tag' };
 }
 
 // Compiles a template source into an op tree. Returns { ops } or { error }.
@@ -487,8 +487,9 @@ function compileTemplate(src) {
       const k = src.indexOf(close, j + (raw ? 3 : 2));
       if (k === -1) return { error: raw ? 'a {{{ is not closed' : 'a {{ is not closed' };
       if (j > textStart) segs.push({ t: 0, s: src.slice(textStart, j) });
-      const path = parsePath(src.slice(j + (raw ? 3 : 2), k));
-      if (!path) return { error: 'a path is not one' };
+      const pathText = src.slice(j + (raw ? 3 : 2), k).replace(/^[ \t]+|[ \t]+$/g, '');
+      const path = parsePath(pathText);
+      if (!path) return { error: '"' + pathText + '" is not a path' };
       segs.push({ t: 1, path, raw });
       i = k + close.length;
       textStart = i;
@@ -504,7 +505,7 @@ function compileTemplate(src) {
       if (standalone) text = text.replace(/[ \t]+$/, '');
       if (text !== '') segs.push({ t: 0, s: text });
       const content = src.slice(j + 2, k).replace(/^[ \t]+|[ \t]+$/g, '');
-      const seg = parseTag(content);
+      const seg = parseTag(content, src.slice(j, tagEnd));
       if (seg.error) return { error: seg.error };
       segs.push(seg);
       i = tagEnd;
@@ -537,24 +538,24 @@ function compileTemplate(src) {
     }
     if (seg.t === 7) {
       const top = stack[stack.length - 1];
-      if (top.kind !== 3 || top.body !== top.node.then) return { error: 'an else without an if' };
+      if (top.kind !== 3 || top.body !== top.node.then) return { error: 'an else outside an if' };
       top.body = top.node.els;
       continue;
     }
     if (seg.t === 5) {
       const top = stack[stack.length - 1];
-      if (top.kind !== 2) return { error: top.kind === 3 ? 'an endfor closes an if' : 'an endfor without a for' };
+      if (top.kind !== 2) return { error: 'an endfor with no open for' };
       stack.pop();
       continue;
     }
     // endif
     const top = stack[stack.length - 1];
-    if (top.kind !== 3) return { error: top.kind === 2 ? 'an endif closes a for' : 'an endif without an if' };
+    if (top.kind !== 3) return { error: 'an endif with no open if' };
     stack.pop();
   }
   if (stack.length > 1) {
     const top = stack[stack.length - 1];
-    return { error: top.kind === 2 ? 'a for is not closed' : 'an if is not closed' };
+    return { error: top.kind === 2 ? 'a for is not closed' : 'a if is not closed' };
   }
   return { ops: root };
 }
@@ -731,7 +732,7 @@ export function run(input) {
     const fmRes = parseFM(lines);
     if (fmRes.error) { report.push('refused ' + f.path + ': ' + fmRes.error); continue; }
     const fm = fmRes.fm;
-    if (!fm.title) { report.push('refused ' + f.path + ': no title'); continue; }
+    if (fm.title === undefined || fm.title === null) { report.push('refused ' + f.path + ': no title'); continue; }
     const dir = dirOf(f.path);
     if (dir === 'tags' || dir.startsWith('tags/') || dir === 'page' || dir.startsWith('page/')) {
       const own = dir === 'tags' || dir.startsWith('tags/') ? 'tags/' : 'page/';
@@ -893,7 +894,7 @@ export function run(input) {
     }
   }
   const tagOps = tplMap.get('tag');
-  let tagsWritten = 0;
+  const tagsWritten = tags.length;
   if (tagOps) {
     for (const t of tags) {
       const tagObj = {
@@ -905,7 +906,6 @@ export function run(input) {
       };
       out['tags/' + t.slug + '/index.html'] = renderToString(tagOps,
         { site: siteCtx, tags: tagsCtx, recent: recentCards, tag: tagObj });
-      tagsWritten += 1;
     }
   }
   const tagsOps = tplMap.get('tags');
@@ -920,6 +920,7 @@ export function run(input) {
   for (const f of statics) {
     if (builtPaths.has(f.path)) {
       report.push('shadowed ' + f.path + ': a built page has its path');
+      staticsWritten += 1;
       continue;
     }
     out[f.path] = f.content;
